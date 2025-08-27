@@ -1,0 +1,85 @@
+---
+title: "FBMSP Figure 3"
+output: html_document
+---
+
+```{r}
+# Figure 3 Right Panel: NP-hardness Design
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(AER)
+library(ISLR)
+library(cluster)
+library(Rtsne)
+library(plotly)
+library(StatMatch)
+library(sandwich)
+
+# Define prices and breakpoints
+p <- c(3, 3.5)
+
+# Mean values
+mu <- numeric(3)
+mu[1] <- 3
+mu[2] <- 3 + (3 / 2) + (3.5 / 4)
+mu[3] <- mu[2] + (3 / 4) + (3.5 / 6)
+
+# Threshold values (breakpoints for cF)
+e <- numeric(5)
+e[1] <- p[2] - mu[3]
+e[2] <- p[1] - mu[2]
+e[3] <- p[2] - mu[2]
+e[4] <- p[1] - mu[1]
+e[5] <- p[2] - mu[1]
+
+# Survival function
+cF <- function(x, e, mu, p) {
+  if (x < -mu[3]) return(1)
+  if (x <= e[1]) return(3 / p[2])
+  if (x <= e[2]) return(2 / p[1])
+  if (x <= e[3]) return(2 / p[2])
+  if (x <= e[4]) return(1 / p[1])
+  if (x <= e[5]) return(1 / p[2])
+  return(0)
+}
+
+# Vectorize cF over x values
+cF <- Vectorize(cF, vectorize.args = "x")
+
+# ------------------------------
+# DATA GENERATION
+# ------------------------------
+# Sequence of prices to evaluate
+x <- seq(0, 7.5, 0.001)
+
+# Revenue calculations for three scenarios
+rev1 <- x * cF(x - mu[1], e, mu, p)
+rev2 <- x * cF(x - mu[2], e, mu, p)
+rev3 <- x * cF(x - mu[3], e, mu, p)
+
+# Combine into data frame for plotting
+data <- data.frame(x, rev1, rev2, rev3)
+
+# ------------------------------
+# PLOTTING
+# ------------------------------
+library(ggplot2)
+
+ggplot(data, aes(x = x)) +
+  geom_line(aes(y = rev1, linetype = "1")) +
+  geom_line(aes(y = rev2, linetype = "2")) +
+  geom_line(aes(y = rev3, linetype = "3")) +
+  scale_linetype_manual(
+    "",
+    values = c(1, 2, 3),
+    labels = c("1", "2", "3")
+  ) +
+  xlab("Price") +
+  ylab("Revenue") +
+  theme(legend.position = "right") +
+  geom_vline(xintercept = p[1], col = "red", linetype = "dotted") +
+  geom_vline(xintercept = p[2], col = "red", linetype = "dotted")
+```
+

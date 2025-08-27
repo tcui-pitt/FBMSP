@@ -1,0 +1,1169 @@
+---
+title: "FBMSP Case Study and Numerics"
+output: 
+---
+
+In this notebook we produce all figures and tables associated with:
+# Section 5: Case Study - Setting Mortgage Interest Rates
+
+```{r}
+## Load packages and data block
+
+library(dplyr)
+library(AER)
+library(ggplot2)
+library(pROC)
+library(plotROC)
+library(caTools)
+library(ROCR)
+library(arm)
+
+HMDA <- read.csv(file = 'data/HMDA.csv')  # Home Mortgage Disclosure Act dataset
+```
+
+
+```{r}
+## Data cleaning and preprocessing block
+
+# Keep only rows with non-missing and non-"Exempt" interest rates
+HMDA <- subset(HMDA, !is.na(HMDA$interest_rate) & interest_rate != "Exempt")
+
+# Remove rows with missing income
+HMDA <- subset(HMDA, !is.na(HMDA$income))
+
+# Keep only rows with known race
+HMDA <- subset(HMDA, derived_race != "Race Not Available")
+
+# Keep only rows with known sex
+HMDA <- subset(HMDA, derived_sex != "Sex Not Available")
+
+# Keep only rows with non-missing loan term
+HMDA <- subset(HMDA, !is.na(HMDA$loan_term))
+
+# Convert income values ≥ 1900 into thousands of dollars
+# (e.g., 4500 becomes 4.5)
+HMDA$income[HMDA$income >= 1900] <- HMDA$income[HMDA$income >= 1900] / 1000
+
+
+## Encode categorical variables into binary indicators
+
+# action_taken: 1 if mortgage is taken (code 6 in original), 0 otherwise
+i <- 1
+while (i <= length(HMDA$action_taken)) {
+  if (HMDA$action_taken[i] == 6) {
+    HMDA$action_taken[i] <- 1
+  } else {
+    HMDA$action_taken[i] <- 0
+  }
+  i <- i + 1
+}
+
+# derived_race: 1 if White, 0 otherwise
+i <- 1
+while (i <= length(HMDA$derived_race)) {
+  if (HMDA$derived_race[i] == "White") {
+    HMDA$derived_race[i] <- 1
+  } else {
+    HMDA$derived_race[i] <- 0
+  }
+  i <- i + 1
+}
+
+# derived_sex: 1 if Joint application, 0 otherwise
+i <- 1
+while (i <= length(HMDA$derived_sex)) {
+  if (HMDA$derived_sex[i] == "Joint") {
+    HMDA$derived_sex[i] <- 1
+  } else {
+    HMDA$derived_sex[i] <- 0
+  }
+  i <- i + 1
+}
+
+# Convert interest_rate, derived_race, and derived_sex to numeric
+HMDA$interest_rate <- as.numeric(HMDA$interest_rate)
+HMDA$derived_race   <- as.numeric(HMDA$derived_race)
+HMDA$derived_sex    <- as.numeric(HMDA$derived_sex)
+
+# Filter out unrealistic interest rates (<1% or >9%)
+HMDA <- subset(HMDA, interest_rate >= 1 & interest_rate <= 9)
+
+# Split the data set into training and testing set
+set.seed(123, sample.kind = "Rejection")
+spl <- sample(nrow(HMDA),0.7*nrow(HMDA))
+HMDA_train <- HMDA[spl, ]
+HMDA_test <- HMDA[-spl, ]
+```
+
+```{r}
+## Estimate Probit regression model and create Table EC. 1 block
+
+# Model: Probability of taking a mortgage based on interest rate, income, derived race, and derived sex
+denyprobit <- glm(
+  action_taken ~ interest_rate + income  + derived_race + derived_sex + loan_type + lien_status + occupancy_type, 
+  family = binomial, 
+  data = HMDA_train
+)
+
+# Table EC. 1
+# Display standard errors for coefficients
+coeftest(denyprobit, vcov. = vcovHC, type = "HC1")
+```
+
+
+
+```{r}
+## ROC curve for the Probit regression model and Figure EC.6 left panel block
+
+# Predict probabilities on the test set
+HMDA_test$predProbs <- predict(denyprobit, newdata = HMDA_test, type = "response")
+
+# Create ROC prediction object
+roc.pred <- prediction(HMDA_test$predProbs, HMDA_test$action_taken)
+
+# Compute performance metrics: TPR (sensitivity) vs FPR (1 - specificity)
+perf <- performance(roc.pred, "tpr", "fpr")
+
+# Plot ROC curve
+plot(perf,
+     main = "ROC Curve",
+     xlab = "1 - Specificity",
+     ylab = "Sensitivity",
+     colorize = TRUE)   # curve color reflects threshold
+
+# Add diagonal reference line (random classifier benchmark)
+abline(0, 1)
+
+# We can compute the Area under the curve 
+# (AUC) in two steps:
+
+perf_auc = performance(roc.pred, "auc")
+as.numeric(perf_auc@y.values)
+```
+
+
+```{r}
+## Binned residuals and create Figure EC.7 left panel block
+
+# Plot binned residuals for the probit regression model
+# - x-axis: fitted values (predicted probabilities from the model)
+# - y-axis: residuals (difference between observed and predicted response)
+# - purpose: check for systematic patterns or model misspecification
+
+binnedplot(
+  fitted(denyprobit),                        # model's predicted probabilities
+  residuals(denyprobit, type = "response")   # residuals on the response scale
+)
+
+```
+
+
+```{r}
+## Create reduced model and Table 2 block
+
+# Model: Probability of taking a mortgage based on interest rate, income, derived race, and derived sex (the most significant variables)
+denyprobit <- glm(
+  action_taken ~ interest_rate + income + derived_race + derived_sex, 
+  family = binomial, 
+  data = HMDA_train
+)
+
+# --- Table 2 --- 
+# Display standard errors for coefficients
+coeftest(denyprobit, vcov. = vcovHC, type = "HC1")
+coe <- denyprobit$coefficients
+sigma = -1/coe[2]
+
+```
+
+
+```{r}
+## Visualization of probability vs. interest rate and Fig. EC. 9 block
+
+# Generate predicted probabilities for a fixed borrower profile
+x     <- seq(0, 15, 0.1)      # Interest rate range
+income <- rep(90, length(x))  # Example: $90k annual income
+race   <- rep(1, length(x))   # White
+sex    <- rep(1, length(x))   # Joint application
+
+# Predict probability using the Probit model
+y <- predict(
+  denyprobit, 
+  list(interest_rate = x, income = income, derived_race = race, derived_sex = sex), 
+  type = "response"
+)
+
+# Figure EC.9 Probit regression model
+
+prediction = data.frame(x, y)
+ggplot(prediction, aes(x=x)) + 
+  geom_line(aes(y=y, colour = 2)) + 
+  geom_hline(yintercept = 0, col = "red", linetype = "dotted") +
+  geom_hline(yintercept = 1, col = "red", linetype = "dotted") +
+  labs(title="Prediction of the probit regression model.",
+       x = "Interest rate",
+       y="Probability of accept") +
+  theme_bw()
+
+```
+
+
+```{r}
+## ROC curve for the reduced Probit regression model and Figure EC.6 right panel block 
+
+# Predict probabilities on the test set
+HMDA_test$predProbs <- predict(denyprobit, newdata = HMDA_test, type = "response")
+
+# Create ROC prediction object
+roc.pred <- prediction(HMDA_test$predProbs, HMDA_test$action_taken)
+
+# Compute performance metrics: TPR (sensitivity) vs FPR (1 - specificity)
+perf <- performance(roc.pred, "tpr", "fpr")
+
+# Plot ROC curve
+plot(perf,
+     main = "ROC Curve",
+     xlab = "1 - Specificity",
+     ylab = "Sensitivity",
+     colorize = TRUE)   # curve color reflects threshold
+
+# Add diagonal reference line (random classifier benchmark)
+abline(0, 1)
+
+# We can compute the Area under the curve 
+# (AUC) in two steps:
+
+perf_auc = performance(roc.pred, "auc")
+as.numeric(perf_auc@y.values)
+
+```
+
+
+```{r}
+## Figure EC.7 right panel block
+
+# Plot binned residuals for the probit regression model
+# - x-axis: fitted values (predicted probabilities from the model)
+# - y-axis: residuals (difference between observed and predicted response)
+# - purpose: check for systematic patterns or model misspecification
+
+binnedplot(
+  fitted(denyprobit),                        # model's predicted probabilities
+  residuals(denyprobit, type = "response")   # residuals on the response scale
+)
+```
+
+
+```{r}
+## Clustering for StP and Fig. 5 Left
+
+# set.seed(1680) # For reproducibility (commented out; uncomment to ensure identical results)
+
+# ============================
+# Load Required Packages
+# ============================
+library(dplyr)       # Data manipulation and cleaning
+library(ISLR)        # Example datasets (not directly used here)
+library(cluster)     # Clustering algorithms (PAM) and distance metrics
+library(Rtsne)       # t-SNE visualization (not used in final plot here)
+library(ggplot2)     # Static visualization (not used in final plot here)
+library(plotly)      # Interactive visualization
+library(StatMatch)   # For Gower distance calculation
+
+# ============================
+# Clustering Step
+# ============================
+
+# Number of observations to sample from HMDA dataset
+n <- 2000
+
+# Extract relevant variables from HMDA dataset
+# Variables: loan action, interest rate, borrower income, race, sex, loan amount, and loan term
+data <- data.frame(
+  HMDA$action_taken,
+  HMDA$interest_rate,
+  HMDA$income,
+  HMDA$derived_race,
+  HMDA$derived_sex,
+  HMDA$loan_amount,
+  as.numeric(HMDA$loan_term)  # Convert loan term to numeric for calculations
+)
+
+# Rename columns for easier reference
+colnames(data) <- c(
+  "action_taken", "interest_rate", "income", "derived_race",
+  "derived_sex", "loan_amount", "loan_term"
+)
+
+# Set the random seed for reproducibility
+set.seed(123, sample.kind = "Rejection")
+
+# Randomly sample n rows to reduce computational load
+data <- data[sample(length(data$income), n), ]
+
+# Number of clusters
+k <- 4
+
+# Compute Gower distance matrix for selected variables
+# Gower distance handles mixed data types (numerical + categorical)
+data_dist <- gower.dist(data.frame(
+  data$income, data$derived_race, data$derived_sex
+))
+
+# Apply Partitioning Around Medoids (PAM) clustering
+# PAM is more robust to outliers than k-means
+pam.res <- pam(data_dist, diss = TRUE, k = k)
+
+# Append cluster assignment to the dataset
+data <- cbind(data, pam.res$clustering)
+colnames(data)[8] <- "cluster"
+
+# ============================
+# Visualization 
+# ============================
+# --- Figure 5: left panel ---
+# Adding small random noise (jitter) to avoid overplotting identical points
+plot_ly(
+  data,
+  x = data$derived_race + 0.1 * rnorm(n),
+  y = data$derived_sex + 0.1 * rnorm(n),
+  color = ~data$cluster
+) %>%
+  add_markers()
+
+
+# ============================
+# Pricing Optimization Step
+# ============================
+
+# Initialize vectors to store optimal prices and revenues for each cluster
+p <- c(1:k)  # Optimal prices
+r <- c(1:k)  # Corresponding revenues
+
+# Loop over clusters to determine optimal pricing
+j <- 1
+while (j <= k) {
+  
+  # Subset data for the current cluster
+  sub <- data[data$cluster == j, ]
+  
+  # Predicted customer threshold price from linear model coefficients
+  # coe[] contains regression coefficients; sigma is assumed predefined
+  pred <- (coe[1] + coe[3]*sub$income +
+           coe[4]*sub$derived_race +
+           coe[5]*sub$derived_sex) / (-coe[2])
+  
+  # Define revenue function given a price p
+  f <- function(p) {
+    
+    # Loan monthly interest rate
+    c <- (p / 12) / 100
+    
+    # Loan parameters
+    n <- sub$loan_term    # Loan term (months)
+    L <- sub$loan_amount  # Loan amount
+    
+    # Profit per loan: annuity formula total payment - principal
+    profit <- L * (c * (1 + c)^n) / ((1 + c)^n - 1) * n - L
+    
+    # Expected revenue: sum over all loans in cluster,
+    # weighted by probability of customer accepting the price
+    rev <- sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+    
+    return(rev)
+  }
+  
+  # Vectorize the revenue function over p
+  f <- Vectorize(f, vectorize.args = "p")
+  
+  # Find the price p that maximizes revenue for this cluster
+  opt <- optimize(f, interval = c(0, 10), maximum = TRUE)
+  
+  # Store results
+  p[j] <- opt$maximum
+  r[j] <- opt$objective
+  
+  j <- j + 1
+}
+
+# ============================
+# Output: Total Revenue Across Clusters
+# ============================
+sum(r)
+
+
+```
+
+
+
+```{r}
+## Optimal FBMSP and Fig. 5 Right
+
+# ==========================
+# FBMSP: Segmenting + Pricing using Dynamic Programming
+# ==========================
+# Purpose: 
+#   - Segment loan applicants into k groups based on predicted thresholds (mu)
+#   - Assign optimal interest rates to each segment to maximize expected profit
+#   - Uses dynamic programming to find the optimal segment boundaries
+#
+# --- Load Required Libraries ---
+library(dplyr)    # For data cleaning and manipulation
+library(ISLR)     # For example datasets (not directly used here except as reference)
+library(cluster)  # For clustering algorithms (Gower similarity, PAM)
+library(Rtsne)    # For t-SNE visualization (optional)
+library(ggplot2)  # For data visualization
+library(plotly)   # For interactive visualization
+
+# --- Helper Function: Calculate Optimal Revenue for a Segment ---
+segment_price = function(segment, data, sigma)
+{
+  # Select subset of customers whose predicted values fall within the given segment
+  sub = data[data$pred >= min(segment) & data$pred <= max(segment), ]
+  pred = sub$pred
+  
+  # Define revenue function for a given price p
+  f = function(p)
+  {
+    c = (p / 12) / 100                  # Convert annual % rate to monthly decimal rate
+    n = sub$loan_term                   # Loan term in months
+    L = sub$loan_amount                  # Loan principal
+    profit = L * (c * (1 + c)^n) / ((1 + c)^n - 1) * n - L  # Total interest income over term
+    
+    # Expected revenue, weighted by probability of acceptance (1 - pnorm(...))
+    rev = sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  f = Vectorize(f, vectorize.args = "p")  # Vectorize so p can be a vector
+  opt = optimize(f, interval = c(0, 10), maximum = TRUE, tol = 1e-16) # Find price maximizing revenue
+  
+  return(opt$objective)  # Return maximum revenue for this segment
+}
+
+# --- Main Script ---
+
+n = 2000  # Sample size for analysis
+
+# Example: Keep relevant columns only (assuming 'data' is preloaded)
+data = subset(data, select = c("action_taken", "interest_rate", "income",
+                               "derived_race", "derived_sex", "loan_amount", "loan_term"))
+
+# Set the random seed for reproducibility
+set.seed(123, sample.kind = "Rejection")
+
+# Randomly sample n observations
+data = data[sample(length(data$income), n), ]
+
+# Predict the expected willingness to pay for each observation using model coefficients
+pred = (coe[1] + coe[3]*data$income + coe[4]*data$derived_race + coe[5]*data$derived_sex) / (-coe[2])
+data = cbind(data, pred)
+
+# Round predicted willingness to pay to 2 decimal places for binning
+pred = floor(100 * pred) / 100
+pred = sort(unique(pred))      # Unique sorted prediction values
+L = length(pred)
+
+# Ensure first and last predictions cover full range
+pred[1] = min(data$pred)
+pred[L] = max(data$pred)
+
+# Map each intermediate pred value to an actual observation's pred
+i = 2
+while(i < L)
+{
+  index = which(min(abs(data$pred - pred[i])) == abs(data$pred - pred[i]))
+  pred[i] = data$pred[index[1]]
+  i = i + 1
+}
+
+# --- Dynamic Programming Setup ---
+# R[i, j] = max revenue for first i price levels using j clusters
+# P[i, j] = index where the split before cluster j occurs
+R = matrix(0, nrow = L+1, ncol = k+1)
+P = matrix(0, nrow = L+1, ncol = k+1)
+
+# Fill DP table
+j = 2
+while(j <= k + 1)  # Loop over number of clusters
+{
+  i = 2
+  while(i <= L + 1)  # Loop over price points
+  {
+    w = 1
+    while(w < i)     # Possible split points
+    {
+      segment = pred[w:(i-1)]
+      rev = segment_price(segment, data, sigma)  # Revenue for this segment
+      if(R[w, j-1] + rev > R[i, j])
+      {
+        R[i, j] = R[w, j-1] + rev
+        P[i, j] = w  # Store split location
+      }
+      w = w + 1
+    }
+    i = i + 1
+  }
+  j = j + 1
+}
+
+# --- Backtracking: Recover Optimal Segmentation ---
+s = c(1:(k+1))
+s[k+1] = L
+i = k
+while(i >= 1)
+{
+  s[i] = P[s[i+1], i+1]
+  i = i - 1
+}
+if(s[1] != 1) { s[1] = 1 }
+
+# Price thresholds for clusters
+mu = pred[s[1:k]]
+
+# Assign each customer to a cluster based on predicted value
+cluster = c(1:n)
+i = 1
+while(i <= n)
+{
+  v = (coe[1] + coe[3]*data$income[i] + coe[4]*data$derived_race[i] + coe[5]*data$derived_sex[i]) / (-coe[2])
+  cluster[i] = max(which(v >= mu))
+  i = i + 1
+}
+
+data = cbind(data, cluster)
+
+# --- Visualization: Scatter plot of clusters by race and sex ---
+# --- Figure 5: right panel ---
+plot_ly(data,
+        x = data$derived_race + 0.1 * rnorm(n),
+        y = data$derived_sex + 0.1 * rnorm(n),
+        color = ~data$cluster) %>%
+  add_markers()
+
+# Print max achievable revenue
+print(R[L+1, k+1])
+
+
+# --- Per-cluster Optimization ---
+r = c(1:k)  # Revenue per cluster
+p = c(1:k)  # Optimal price per cluster
+j = 1
+while(j <= k)
+{
+  sub = data[data$cluster == j, ]
+  pred = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex) / (-coe[2])
+  
+  f = function(p)
+  {
+    c = (p / 12) / 100
+    n = sub$loan_term
+    L = sub$loan_amount
+    profit = L * (c * (1 + c)^n) / ((1 + c)^n - 1) * n - L
+    rev = sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  f = Vectorize(f, vectorize.args = "p")
+  opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+  
+  r[j] = opt$objective
+  p[j] = opt$maximum
+  
+  j = j + 1
+}
+
+# Final average revenue across clusters
+sum(r) / 20
+```
+
+
+
+
+
+```{r}
+## Figure 6 left panel
+
+sigma = 0  # standard deviation in demand noise
+
+set.seed(1680) # for reproducibility
+
+# Load packages
+library(dplyr)     # data cleaning / manipulation
+library(ISLR)      # sample datasets (not used here, but available)
+library(cluster)   # gower similarity + PAM clustering
+library(Rtsne)     # dimensionality reduction (not used here, but loaded)
+library(ggplot2)   # visualization
+library(plotly)    # interactive plots (not used here, but loaded)
+
+# -----------------------------
+# Step 1: Preprocess data
+# -----------------------------
+# Keep only relevant columns
+data = subset(data, select = c(
+  "action_taken", "interest_rate", "income",
+  "derived_race", "derived_sex", "loan_amount", "loan_term"
+))
+
+# Compute Gower distance for mixed-type features
+data_dist = gower.dist(data.frame(data$income, data$derived_race, data$derived_sex))
+
+# -----------------------------
+# Step 2: PAM Clustering + Pricing
+# -----------------------------
+n = 2000
+profit = numeric(10)  # store average profits for k = 1,...,10
+
+for (k in 1:10) {
+  
+  # Run PAM clustering
+  pam.res = pam(data_dist, diss = TRUE, k)
+  
+  # Attach cluster labels to dataset
+  data$cluster = pam.res$clustering
+  
+  # Store profit and price for each cluster
+  r = numeric(k)
+  p = numeric(k)
+  
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    
+    # Predict interest rate threshold from coefficients (assume 'coe' defined elsewhere)
+    pred = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    # Revenue function for given price p
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      
+      # Profit from a loan
+      profit = L * (c*(1 + c)^n) / ((1+c)^n - 1) * n - L
+      
+      # Expected revenue (purchase prob modeled by normal CDF around 'pred')
+      rev = sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    
+    # Vectorize over p
+    f = Vectorize(f, "p")
+    
+    # Find optimal price
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+  }
+  
+  # Store average profit across clusters
+  profit[k] = sum(r)/n
+}
+
+
+# -----------------------------
+# Step 3: Dynamic Programming Segmentation (FBMSP)
+# -----------------------------
+segment_price = function(segment, data, sigma) {
+  # Subset customers whose predicted willingness-to-pay falls inside the segment
+  sub = data[data$pred >= min(segment) & data$pred <= max(segment), ]
+  
+  f = function(p) {
+    c = (p/12)/100
+    n = sub$loan_term
+    L = sub$loan_amount
+    profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+    
+    rev = sum(profit * (1 - pnorm(p - sub$pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  f = Vectorize(f, "p")
+  opt = optimize(f, interval = c(0, 10), maximum = TRUE, tol = 1e-16)
+  return(opt$objective)
+}
+
+
+# Compute predicted willingness-to-pay for each applicant
+data$pred = (coe[1] + coe[3]*data$income + coe[4]*data$derived_race + coe[5]*data$derived_sex)/(-coe[2])
+data$pred = floor(100*data$pred)/100  # round for discretization
+
+pred = sort(unique(data$pred))
+L = length(pred)
+
+profit_F = numeric(10)  # store profits from FBMSP
+
+for (k in 1:10) {
+  
+  start = Sys.time()
+  
+  # Dynamic programming table
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  for (j in 2:(k+1)) {
+    for (i in 2:(L+1)) {
+      for (w in 1:(i-1)) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+      }
+    }
+  }
+  
+  # Backtrack to get optimal segmentation
+  s = numeric(k+1)
+  s[k+1] = L
+  for (i in k:1) {
+    s[i] = P[s[i+1], i+1]
+  }
+  if (s[1] != 1) s[1] = 1
+  
+  mu = pred[s[1:k]]  # segmentation thresholds
+  
+  # Assign customers to clusters
+  data$cluster = sapply(1:nrow(data), function(i) {
+    v = (coe[1] + coe[3]*data$income[i] + coe[4]*data$derived_race[i] + coe[5]*data$derived_sex[i])/(-coe[2])
+    return(max(which(v >= mu)))
+  })
+  
+  end = Sys.time()
+  print(end - start)
+  
+  # Optimize pricing within each segment
+  r = numeric(k)
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    prediction = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+      rev = sum(profit * (1 - pnorm(p - prediction, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    f = Vectorize(f, "p")
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+  }
+  
+  profit_F[k] = sum(r)/n
+}
+
+
+# -----------------------------
+# Step 4: Compare Strategies
+# -----------------------------
+# --- Figure 6 left panel ---
+
+segment = 1:10
+profit_sigma_0 = data.frame(segment, profit, profit_F)
+
+ggplot(profit_sigma_0, aes(x=segment)) + 
+  geom_line(aes(y=profit_F, linetype="Dynamic Programming")) + 
+  geom_point(aes(y=profit_F)) + 
+  geom_line(aes(y=profit, linetype="Clustering (PAM)")) + 
+  geom_point(aes(y=profit)) + 
+  labs(title="Profit for Clustering vs. Dynamic Segmentation",
+       x = "Number of Segments",
+       y = "Profit") +
+  theme_bw()
+
+```
+
+
+
+```{r}
+## Figure 6 middle panel
+
+sigma = 0.5  # standard deviation in demand noise
+set.seed(1680) # for reproducibility
+
+# Load packages
+library(dplyr)     # data cleaning / manipulation
+library(ISLR)      # sample datasets (not used here, but available)
+library(cluster)   # gower similarity + PAM clustering
+library(Rtsne)     # dimensionality reduction (not used here, but loaded)
+library(ggplot2)   # visualization
+library(plotly)    # interactive plots (not used here, but loaded)
+
+# -----------------------------
+# Step 1: Preprocess data
+# -----------------------------
+# Keep only relevant columns
+data = subset(data, select = c(
+  "action_taken", "interest_rate", "income",
+  "derived_race", "derived_sex", "loan_amount", "loan_term"
+))
+
+# Compute Gower distance for mixed-type features
+data_dist = gower.dist(data.frame(data$income, data$derived_race, data$derived_sex))
+
+# -----------------------------
+# Step 2: PAM Clustering + Pricing
+# -----------------------------
+n = 2000
+profit = numeric(10)  # store average profits for k = 1,...,10
+
+for (k in 1:10) {
+  
+  # Run PAM clustering
+  pam.res = pam(data_dist, diss = TRUE, k)
+  
+  # Attach cluster labels to dataset
+  data$cluster = pam.res$clustering
+  
+  # Store profit and price for each cluster
+  r = numeric(k)
+  p = numeric(k)
+  
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    
+    # Predict interest rate threshold from coefficients (assume 'coe' defined elsewhere)
+    pred = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    # Revenue function for given price p
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      
+      # Profit from a loan
+      profit = L * (c*(1 + c)^n) / ((1+c)^n - 1) * n - L
+      
+      # Expected revenue (purchase prob modeled by normal CDF around 'pred')
+      rev = sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    
+    # Vectorize over p
+    f = Vectorize(f, "p")
+    
+    # Find optimal price
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+  }
+  
+  # Store average profit across clusters
+  profit[k] = sum(r)/n
+}
+
+
+# -----------------------------
+# Step 3: Dynamic Programming Segmentation (FBMSP)
+# -----------------------------
+segment_price = function(segment, data, sigma) {
+  # Subset customers whose predicted willingness-to-pay falls inside the segment
+  sub = data[data$pred >= min(segment) & data$pred <= max(segment), ]
+  
+  f = function(p) {
+    c = (p/12)/100
+    n = sub$loan_term
+    L = sub$loan_amount
+    profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+    
+    rev = sum(profit * (1 - pnorm(p - sub$pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  f = Vectorize(f, "p")
+  opt = optimize(f, interval = c(0, 10), maximum = TRUE, tol = 1e-16)
+  return(opt$objective)
+}
+
+
+# Compute predicted willingness-to-pay for each applicant
+data$pred = (coe[1] + coe[3]*data$income + coe[4]*data$derived_race + coe[5]*data$derived_sex)/(-coe[2])
+data$pred = floor(100*data$pred)/100  # round for discretization
+
+pred = sort(unique(data$pred))
+L = length(pred)
+
+profit_F = numeric(10)  # store profits from FBMSP
+
+for (k in 1:10) {
+  
+  start = Sys.time()
+  
+  # Dynamic programming table
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  for (j in 2:(k+1)) {
+    for (i in 2:(L+1)) {
+      for (w in 1:(i-1)) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+      }
+    }
+  }
+  
+  # Backtrack to get optimal segmentation
+  s = numeric(k+1)
+  s[k+1] = L
+  for (i in k:1) {
+    s[i] = P[s[i+1], i+1]
+  }
+  if (s[1] != 1) s[1] = 1
+  
+  mu = pred[s[1:k]]  # segmentation thresholds
+  
+  # Assign customers to clusters
+  data$cluster = sapply(1:nrow(data), function(i) {
+    v = (coe[1] + coe[3]*data$income[i] + coe[4]*data$derived_race[i] + coe[5]*data$derived_sex[i])/(-coe[2])
+    return(max(which(v >= mu)))
+  })
+  
+  end = Sys.time()
+  print(end - start)
+  
+  # Optimize pricing within each segment
+  r = numeric(k)
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    prediction = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+      rev = sum(profit * (1 - pnorm(p - prediction, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    f = Vectorize(f, "p")
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+  }
+  
+  profit_F[k] = sum(r)/n
+}
+
+
+# -----------------------------
+# Step 4: Compare Strategies
+# -----------------------------
+# --- Figure 6 middle panel ---
+
+segment = 1:10
+profit_sigma_0 = data.frame(segment, profit, profit_F)
+
+ggplot(profit_sigma_0, aes(x=segment)) + 
+  geom_line(aes(y=profit_F, linetype="Dynamic Programming")) + 
+  geom_point(aes(y=profit_F)) + 
+  geom_line(aes(y=profit, linetype="Clustering (PAM)")) + 
+  geom_point(aes(y=profit)) + 
+  labs(title="Profit for Clustering vs. Dynamic Segmentation",
+       x = "Number of Segments",
+       y = "Profit") +
+  theme_bw()
+
+```
+
+
+
+```{r}
+## Figure 6 right panel
+
+sigma = 1  # standard deviation in demand noise
+set.seed(1680) # for reproducibility
+
+# Load packages
+library(dplyr)     # data cleaning / manipulation
+library(ISLR)      # sample datasets (not used here, but available)
+library(cluster)   # gower similarity + PAM clustering
+library(Rtsne)     # dimensionality reduction (not used here, but loaded)
+library(ggplot2)   # visualization
+library(plotly)    # interactive plots (not used here, but loaded)
+
+# -----------------------------
+# Step 1: Preprocess data
+# -----------------------------
+# Keep only relevant columns
+data = subset(data, select = c(
+  "action_taken", "interest_rate", "income",
+  "derived_race", "derived_sex", "loan_amount", "loan_term"
+))
+
+# Compute Gower distance for mixed-type features
+data_dist = gower.dist(data.frame(data$income, data$derived_race, data$derived_sex))
+
+# -----------------------------
+# Step 2: PAM Clustering + Pricing
+# -----------------------------
+n = 2000
+profit = numeric(10)  # store average profits for k = 1,...,10
+
+for (k in 1:10) {
+  
+  # Run PAM clustering
+  pam.res = pam(data_dist, diss = TRUE, k)
+  
+  # Attach cluster labels to dataset
+  data$cluster = pam.res$clustering
+  
+  # Store profit and price for each cluster
+  r = numeric(k)
+  p = numeric(k)
+  
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    
+    # Predict interest rate threshold from coefficients (assume 'coe' defined elsewhere)
+    pred = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    # Revenue function for given price p
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      
+      # Profit from a loan
+      profit = L * (c*(1 + c)^n) / ((1+c)^n - 1) * n - L
+      
+      # Expected revenue (purchase prob modeled by normal CDF around 'pred')
+      rev = sum(profit * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    
+    # Vectorize over p
+    f = Vectorize(f, "p")
+    
+    # Find optimal price
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+  }
+  
+  # Store average profit across clusters
+  profit[k] = sum(r)/n
+}
+
+
+# -----------------------------
+# Step 3: Dynamic Programming Segmentation (FBMSP)
+# -----------------------------
+segment_price = function(segment, data, sigma) {
+  # Subset customers whose predicted willingness-to-pay falls inside the segment
+  sub = data[data$pred >= min(segment) & data$pred <= max(segment), ]
+  
+  f = function(p) {
+    c = (p/12)/100
+    n = sub$loan_term
+    L = sub$loan_amount
+    profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+    
+    rev = sum(profit * (1 - pnorm(p - sub$pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  f = Vectorize(f, "p")
+  opt = optimize(f, interval = c(0, 10), maximum = TRUE, tol = 1e-16)
+  return(opt$objective)
+}
+
+
+# Compute predicted willingness-to-pay for each applicant
+data$pred = (coe[1] + coe[3]*data$income + coe[4]*data$derived_race + coe[5]*data$derived_sex)/(-coe[2])
+data$pred = floor(100*data$pred)/100  # round for discretization
+
+pred = sort(unique(data$pred))
+L = length(pred)
+
+profit_F = numeric(10)  # store profits from FBMSP
+
+for (k in 1:10) {
+  
+  start = Sys.time()
+  
+  # Dynamic programming table
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  for (j in 2:(k+1)) {
+    for (i in 2:(L+1)) {
+      for (w in 1:(i-1)) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+      }
+    }
+  }
+  
+  # Backtrack to get optimal segmentation
+  s = numeric(k+1)
+  s[k+1] = L
+  for (i in k:1) {
+    s[i] = P[s[i+1], i+1]
+  }
+  if (s[1] != 1) s[1] = 1
+  
+  mu = pred[s[1:k]]  # segmentation thresholds
+  
+  # Assign customers to clusters
+  data$cluster = sapply(1:nrow(data), function(i) {
+    v = (coe[1] + coe[3]*data$income[i] + coe[4]*data$derived_race[i] + coe[5]*data$derived_sex[i])/(-coe[2])
+    return(max(which(v >= mu)))
+  })
+  
+  end = Sys.time()
+  print(end - start)
+  
+  # Optimize pricing within each segment
+  r = numeric(k)
+  for (j in 1:k) {
+    sub = data[data$cluster == j, ]
+    prediction = (coe[1] + coe[3]*sub$income + coe[4]*sub$derived_race + coe[5]*sub$derived_sex)/(-coe[2])
+    
+    f = function(p) {
+      c = (p/12)/100
+      n = sub$loan_term
+      L = sub$loan_amount
+      profit = L*(c*(1 + c)^n)/((1+c)^n - 1)*n - L
+      rev = sum(profit * (1 - pnorm(p - prediction, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    f = Vectorize(f, "p")
+    opt = optimize(f, interval = c(0, 10), maximum = TRUE)
+    r[j] = opt$objective
+  }
+  
+  profit_F[k] = sum(r)/n
+}
+
+# -----------------------------
+# Step 4: Compare Strategies
+# -----------------------------
+# --- Figure 6 right panel ---
+
+segment = 1:10
+profit_sigma_0 = data.frame(segment, profit, profit_F)
+
+ggplot(profit_sigma_0, aes(x=segment)) + 
+  geom_line(aes(y=profit_F, linetype="Dynamic Programming")) + 
+  geom_point(aes(y=profit_F)) + 
+  geom_line(aes(y=profit, linetype="Clustering (PAM)")) + 
+  geom_point(aes(y=profit)) + 
+  labs(title="Profit for Clustering vs. Dynamic Segmentation",
+       x = "Number of Segments",
+       y = "Profit") +
+  theme_bw()
+
+```
+

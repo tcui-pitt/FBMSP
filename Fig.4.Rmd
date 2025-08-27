@@ -1,0 +1,579 @@
+---
+title: "FBMSP Figure 4"
+output: html_document
+---
+
+```{r}
+# ---------------------------------------------------------------
+# Function: segment_price
+# Computes the maximum revenue for a given segment of predictions
+# under Gaussian noise (sigma).
+# ---------------------------------------------------------------
+segment_price = function(segment, data, sigma) {
+  
+  # Subset data points that fall within the current segment
+  sub = subset(data, data$pred >= min(segment) & data$pred <= max(segment))
+  pred = sub$pred
+  
+  # Define revenue function for a price p
+  f = function(p) {
+    rev = sum(p * (1 - pnorm(p - pred, mean = 0, sd = sigma)))
+    return(rev)
+  }
+  
+  # Vectorize function f so it can take vector inputs for p
+  f = Vectorize(f, vectorize.args = "p")
+  
+  # Optimize revenue over the interval [0, 20]
+  opt = optimize(f, interval = c(0, 20), maximum = TRUE, tol = 1e-16)
+  
+  return(opt$objective) # Return the maximum revenue
+}
+
+
+# ---------------------------------------------------------------
+# Simulation setup
+# ---------------------------------------------------------------
+n = 1000                     # Number of customers
+pred = runif(n, 1, 10)        # Predicted valuations ~ Uniform[1, 10]
+sigma = 1                     # Standard deviation of noise
+pred = floor(10 * pred) / 10  # Round to nearest 0.1
+data = data.frame(pred)
+
+# Unique sorted predicted valuations
+pred = sort(unique(pred))
+L = length(pred)
+
+# Store profits for up to 15 segments
+profit_F = c(1:15)
+
+
+# ---------------------------------------------------------------
+# Dynamic Programming for Optimal Segmentation
+# ---------------------------------------------------------------
+k = 1
+while (k <= 15) {
+  
+  start = Sys.time()
+  data = subset(data, select = c("pred"))
+  
+  # DP tables:
+  # R[i, j] = max revenue using first i points and j segments
+  # P[i, j] = partition index for reconstruction
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  j = 2
+  while (j <= k + 1) {
+    i = 2
+    while (i <= L + 1) {
+      w = 1
+      while (w < i) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+        w = w + 1
+      }
+      i = i + 1
+    }
+    j = j + 1
+  }
+  
+  # -----------------------------------------------------------
+  # Backtrack to recover optimal segmentation boundaries
+  # -----------------------------------------------------------
+  s = c(1:(k+1))
+  s[k+1] = L
+  i = k
+  while (i >= 1) {
+    s[i] = P[s[i+1], i+1]
+    i = i - 1
+  }
+  if (s[1] != 1) {
+    s[1] = 1
+  }
+  
+  # Segment centers (μ) for clustering
+  mu = pred[s[1:k]]
+  
+  # Assign each data point to a segment cluster
+  cluster = c(1:n)
+  i = 1
+  while (i <= n) {
+    cluster[i] = max(which(data$pred[i] >= mu))
+    i = i + 1
+  }
+  data = cbind(data, cluster)
+  
+  end = Sys.time()
+  print(end - start) # Track runtime
+  
+  # -----------------------------------------------------------
+  # Compute optimal price and revenue per cluster
+  # -----------------------------------------------------------
+  r = c(1:k) # Revenue per cluster
+  p = c(1:k) # Price per cluster
+  
+  j = 1
+  while (j <= k) {
+    sub = data[data$cluster == j, ]
+    prediction = sub$pred
+    
+    f = function(p) {
+      rev = sum(p * (1 - pnorm(p - prediction, mean = 0, sd = sigma)))
+      return(rev)
+    }
+    f = Vectorize(f, vectorize.args = "p")
+    
+    opt = optimize(f, interval = c(0, 20), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+    
+    j = j + 1
+  }
+  
+  # Average profit across all customers for k segments
+  profit_F[k] = sum(r) / n
+  
+  k = k + 1
+}
+
+profit_N = profit_F
+
+# ---------------------------------------------------------------
+# Benchmark: Individual optimal pricing (no clustering)
+# ---------------------------------------------------------------
+
+r = c(1:n)
+i = 1
+while (i <= n) {
+  f = function(p) {
+    rev = sum(p * (1 - pnorm(p - data$pred[i], mean = 0, sd = sigma)))
+    return(rev)
+  }
+  f = Vectorize(f, vectorize.args = "p")
+  
+  opt = optimize(f, interval = c(0, 20), maximum = TRUE)
+  r[i] = opt$objective
+  i = i + 1
+}
+
+# Profit benchmark for sigma = 1
+segment = c(1:15)
+profit = rep(mean(r), 15)
+
+
+# ---------------------------------------------------------------
+# Figure 4, Left panel
+# Visualization: Profit loss vs. bound 
+# ---------------------------------------------------------------
+bound = 9 / (c(1:15))          # Theoretical bound
+diff = mean(r) - profit_N      # Profit loss
+profit_sigma_1 = data.frame(segment, diff, bound)
+
+library(ggplot2)
+ggplot(profit_sigma_1, aes(x = segment)) + 
+  geom_line(aes(y = diff, linetype = "1")) + 
+  geom_point(aes(y = diff)) + 
+  geom_line(aes(y = bound, linetype = "2")) + 
+  geom_point(aes(y = bound)) + 
+  labs(title = "Profit for Clustering and Pricing",
+       x = "Number of Segments",
+       y = "Profit Difference") +
+  theme_bw()
+
+```
+
+```{r}
+# ===============================================================
+# Function: segment_price
+# ---------------------------------------------------------------
+# Computes the maximum expected revenue for a given customer
+# segment, under additive Uniform[-1,1] noise on valuations.
+# ===============================================================
+segment_price = function(segment, data, sigma) {
+  
+  # Select subset of data corresponding to this segment
+  sub = subset(data, data$pred >= min(segment) & data$pred <= max(segment))
+  pred = sub$pred
+  
+  # Define revenue function for price p
+  f = function(p) {
+    # Purchase probability = 1 - F(p - v), with F = Uniform[-1,1] CDF
+    rev = sum(p * (1 - punif(p - pred, min = -1, max = 1)))
+    return(rev)
+  }
+  
+  # Vectorize for numerical optimization
+  f = Vectorize(f, vectorize.args = "p")
+  
+  # Optimize revenue over [0, 12]
+  opt = optimize(f, interval = c(0, 12), maximum = TRUE, tol = 1e-16)
+  
+  return(opt$objective)
+}
+
+
+# ===============================================================
+# Simulation Setup
+# ===============================================================
+n = 1000                # Number of customers
+
+# NOTE: pred and L should be defined before running the loop
+# Example:
+# pred = runif(n, 1, 10)          # true valuations
+# pred = floor(10 * pred) / 10    # round to 0.1
+# data = data.frame(pred)
+# pred = sort(unique(pred))
+# L = length(pred)
+
+profit_F = c(1:15)       # Store profits with k = 1..15 clusters
+
+
+# ===============================================================
+# Dynamic Programming for Optimal Segmentation
+# ===============================================================
+k = 1
+while (k <= 15) {
+  
+  start = Sys.time()
+  data = subset(data, select = c("pred"))
+  
+  # DP tables:
+  # R[i, j] = max revenue using first i points and j segments
+  # P[i, j] = partition index for reconstruction
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  j = 2
+  while (j <= k + 1) {
+    i = 2
+    while (i <= L + 1) {
+      w = 1
+      while (w < i) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+        w = w + 1
+      }
+      i = i + 1
+    }
+    j = j + 1
+  }
+  
+  # -------------------------------------------------------------
+  # Backtrack to recover optimal segmentation boundaries
+  # -------------------------------------------------------------
+  s = c(1:(k+1))
+  s[k+1] = L
+  i = k
+  while (i >= 1) {
+    s[i] = P[s[i+1], i+1]
+    i = i - 1
+  }
+  if (s[1] != 1) {
+    s[1] = 1
+  }
+  
+  # Segment centers (μ) for clustering
+  mu = pred[s[1:k]]
+  
+  # Assign each data point to a segment cluster
+  cluster = c(1:n)
+  i = 1
+  while (i <= n) {
+    cluster[i] = max(which(data$pred[i] >= mu))
+    i = i + 1
+  }
+  
+  data = cbind(data, cluster)
+  
+  end = Sys.time()
+  print(end - start)  # Track runtime
+  
+  
+  # -------------------------------------------------------------
+  # Compute optimal price and revenue per cluster
+  # -------------------------------------------------------------
+  r = c(1:k)  # Revenue per cluster
+  p = c(1:k)  # Price per cluster
+  
+  j = 1
+  while (j <= k) {
+    sub = data[data$cluster == j, ]
+    prediction = sub$pred
+    
+    f = function(p) {
+      rev = sum(p * (1 - punif(p - prediction, min = -1, max = 1)))
+      return(rev)
+    }
+    f = Vectorize(f, vectorize.args = "p")
+    
+    opt = optimize(f, interval = c(0, 12), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+    
+    j = j + 1
+  }
+  
+  # Average profit across all customers for k segments
+  profit_F[k] = sum(r) / n
+  
+  k = k + 1
+}
+
+# Save clustering-based profit results
+profit_U = profit_F
+
+
+# ===============================================================
+# Benchmark: Individual optimal pricing (no clustering)
+# ===============================================================
+r = c(1:n)
+i = 1
+while (i <= n) {
+  f = function(p) {
+    rev = sum(p * (1 - punif(p - data$pred[i], min = -1, max = 1)))
+    return(rev)
+  }
+  f = Vectorize(f, vectorize.args = "p")
+  
+  # Only optimize over local range [v-1, v+1] since support is bounded
+  opt = optimize(f, interval = c(data$pred[i] - 1, data$pred[i] + 1), maximum = TRUE)
+  r[i] = opt$objective
+  i = i + 1
+}
+
+# Reference profit (benchmark, full personalization)
+segment = c(1:15)
+profit = rep(mean(r), 15)
+
+
+# ===============================================================
+# Figure 4, Middle panel
+# Visualization: Profit Loss vs Bound
+# ===============================================================
+bound = 9 / (c(1:15))         # Theoretical upper bound
+diff = mean(r) - profit_U     # Profit loss due to clustering
+profit_sigma_1 = data.frame(segment, diff, bound)
+
+library(ggplot2)
+ggplot(profit_sigma_1, aes(x = segment)) + 
+  geom_line(aes(y = diff, linetype = "1")) + 
+  geom_point(aes(y = diff)) + 
+  geom_line(aes(y = bound, linetype = "2")) + 
+  geom_point(aes(y = bound)) + 
+  labs(title = "Profit for Clustering and Pricing (Uniform Noise)",
+       x = "Number of Segments",
+       y = "Profit Difference") +
+  theme_bw()
+
+```
+
+
+```{r}
+# ===============================================================
+# Function: segment_price
+# ---------------------------------------------------------------
+# Computes the maximum expected revenue for a given customer
+# segment, assuming additive Weibull( shape=5, scale=1 ) noise.
+# 
+# Input:
+#   - segment : vector of predicted valuations in the segment
+#   - data    : data frame containing all predicted valuations
+#   - sigma   : unused in this Weibull version (kept for consistency)
+# 
+# Output:
+#   - Maximum revenue achievable by setting an optimal price
+# ===============================================================
+segment_price = function(segment, data, sigma) {
+  
+  # Select subset of data corresponding to this segment
+  sub = subset(data, data$pred >= min(segment) & data$pred <= max(segment))
+  pred = sub$pred
+  
+  # Define expected revenue function for price p
+  f = function(p) {
+    # Purchase probability = 1 - F(p - v), with F = Weibull CDF
+    rev = sum(p * (1 - pweibull(p - pred, shape = 5, scale = 1)))
+    return(rev)
+  }
+  
+  # Vectorize for optimization
+  f = Vectorize(f, vectorize.args = "p")
+  
+  # Optimize over a reasonable global price range [0, 12]
+  opt = optimize(f, interval = c(0, 12), maximum = TRUE, tol = 1e-16)
+  
+  return(opt$objective)
+}
+
+
+# ===============================================================
+# Simulation Setup
+# ===============================================================
+n = 1000                # Number of customers
+
+# Example (uncomment when running):
+# pred = runif(n, 1, 10)          # predicted valuations
+# pred = floor(10 * pred) / 10    # round to nearest 0.1
+# data = data.frame(pred)
+# pred = sort(unique(pred))       # unique sorted predictions
+# L = length(pred)
+
+profit_F = c(1:15)       # Profits for k = 1..15 clusters
+
+
+# ===============================================================
+# Dynamic Programming for Optimal Segmentation
+# ===============================================================
+k = 1
+while (k <= 15) {
+  
+  start = Sys.time()
+  data = subset(data, select = c("pred"))
+  
+  # DP tables:
+  # R[i, j] = max revenue using first i points and j segments
+  # P[i, j] = partition index for reconstruction
+  R = matrix(0, nrow = L+1, ncol = k+1)
+  P = matrix(0, nrow = L+1, ncol = k+1)
+  
+  # Fill DP table
+  j = 2
+  while (j <= k + 1) {
+    i = 2
+    while (i <= L + 1) {
+      w = 1
+      while (w < i) {
+        segment = pred[w:(i-1)]
+        rev = segment_price(segment, data, sigma)
+        if (R[w, j-1] + rev > R[i, j]) {
+          R[i, j] = R[w, j-1] + rev
+          P[i, j] = w
+        }
+        w = w + 1
+      }
+      i = i + 1
+    }
+    j = j + 1
+  }
+  
+  # -------------------------------------------------------------
+  # Backtrack to recover optimal segmentation boundaries
+  # -------------------------------------------------------------
+  s = c(1:(k+1))
+  s[k+1] = L
+  i = k
+  while (i >= 1) {
+    s[i] = P[s[i+1], i+1]
+    i = i - 1
+  }
+  if (s[1] != 1) {
+    s[1] = 1
+  }
+  
+  # Segment centers (μ) for clustering
+  mu = pred[s[1:k]]
+  
+  # Assign each data point to a segment cluster
+  cluster = c(1:n)
+  i = 1
+  while (i <= n) {
+    cluster[i] = max(which(data$pred[i] >= mu))
+    i = i + 1
+  }
+  
+  data = cbind(data, cluster)
+  
+  end = Sys.time()
+  print(end - start)   # Track runtime
+  
+  
+  # -------------------------------------------------------------
+  # Compute optimal price and revenue per cluster
+  # -------------------------------------------------------------
+  r = c(1:k)  # Revenue per cluster
+  p = c(1:k)  # Price per cluster
+  
+  j = 1
+  while (j <= k) {
+    sub = data[data$cluster == j, ]
+    prediction = sub$pred
+    
+    f = function(p) {
+      rev = sum(p * (1 - pweibull(p - prediction, shape = 5, scale = 1)))
+      return(rev)
+    }
+    f = Vectorize(f, vectorize.args = "p")
+    
+    opt = optimize(f, interval = c(0, 12), maximum = TRUE)
+    r[j] = opt$objective
+    p[j] = opt$maximum
+    
+    j = j + 1
+  }
+  
+  # Average profit across all customers for k segments
+  profit_F[k] = sum(r) / n
+  
+  k = k + 1
+}
+
+# Save clustering-based profit results (Weibull case)
+profit_W = profit_F
+
+
+# ===============================================================
+# Benchmark: Individual optimal pricing (no clustering)
+# ===============================================================
+r = c(1:n)
+i = 1
+while (i <= n) {
+  f = function(p) {
+    rev = sum(p * (1 - pweibull(p - data$pred[i], shape = 5, scale = 1)))
+    return(rev)
+  }
+  f = Vectorize(f, vectorize.args = "p")
+  
+  # Local search around v (since Weibull support is unbounded, 
+  # we pick [v-3, v+3] as a reasonable optimization window)
+  opt = optimize(f, interval = c(data$pred[i] - 3, data$pred[i] + 3), maximum = TRUE)
+  r[i] = opt$objective
+  i = i + 1
+}
+
+# Reference profit (benchmark, full personalization)
+segment = c(1:15)
+profit = rep(mean(r), 15)
+
+
+# ===============================================================
+# Figure 4, Right panel
+# Visualization: Profit Loss vs Bound
+# ===============================================================
+bound = 9 / (c(1:15))         # Theoretical upper bound
+diff = mean(r) - profit_W     # Profit loss due to clustering
+profit_sigma_1 = data.frame(segment, diff, bound)
+
+library(ggplot2)
+ggplot(profit_sigma_1, aes(x = segment)) + 
+  geom_line(aes(y = diff, linetype = "1")) + 
+  geom_point(aes(y = diff)) + 
+  geom_line(aes(y = bound, linetype = "2")) + 
+  geom_point(aes(y = bound)) + 
+  labs(title = "Profit for Clustering and Pricing (Weibull Noise)",
+       x = "Number of Segments",
+       y = "Profit Difference") +
+  theme_bw()
+
+```
+
