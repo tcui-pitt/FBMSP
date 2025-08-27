@@ -1,9 +1,13 @@
 FBMSP Case Study and Numerics
 
-This repository contains an R Notebook that produces the figures and
-tables associated with Section 5: Case Study — Setting Mortgage Interest 
+This repository contains an:
+1. Case_Study_Code.Rmd - An R Notebook that produces the figures and
+tables associated with Section 5: Case Study — Setting Mortgage Interest
 Rates from the Feature-Based Market Segmentation & Pricing (FBMSP)
 research.
+2. Fig.3.Rmd - An R Notebook that produces Figure 3
+3. Fig.4.Rmd - An R Notebook that produced Figure 4
+4. HMDA.csv - A csv file that contains the data downloaded from the Home Mortgage Disclosure Act (HMDA) website, https://ffiec.cfpb.gov/ in 2020. 
 
 Overview
 
@@ -16,7 +20,7 @@ Disclosure Act (HMDA) dataset.
 
 Requirements
 
-The notebook is written in R (tested with R ≥ 4.0). The following
+The notebook is written in R (tested with version R 4.5.0). The following
 packages are required:
 
 -   dplyr
@@ -35,7 +39,7 @@ Install them via:
 Data
 
 -   Input: data/HMDA.csv
-    This is the Home Mortgage Disclosure Act (HMDA) dataset.
+    This is the Home Mortgage Disclosure Act (HMDA) dataset from 2020.
     Make sure the CSV is located in the data/ directory before running
     the notebook.
 
@@ -59,4 +63,8 @@ Output
 Citation
 
 If you use this notebook or adapt its methods, please cite the
-associated paper on Feature-Based Market Segmentation & Pricing (FBMSP).
+associated paper:
+
+Cui, T., & Hamilton, M. (2022). Optimal Feature-Based Market Segmentation and Pricing. Available at SSRN 4151103.
+
+
